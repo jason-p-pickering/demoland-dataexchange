@@ -1,0 +1,385 @@
+---
+title: 'DATIM Data Exchange: Exchanging data between Trainingland and Demoland'
+author: "DATIM Development Team"
+date: "12/29/2015"
+output: html_document
+---
+
+#Introduction
+
+In this document, we will simulate a rather typical data exchange scenario between a sample Ministry of Health HMIS (Trainingland) with the PEPFAR data management system, DATIM. We will use the "Demoland" training instance of DATIM, located at [https://demo.datim.org](https://demo.datim.org).
+
+Trainingland is a training database developed by the DHIS2 core development team. It is freely available from a GitHub repository [here](https://github.com/dhis2/dhis2-trainingland)
+
+In this excercise, we will simulate the data exchange of a few data elements between Trainingland and Demoland. These two ficticious countries share much in common. Trainingland's organisational hierarchy was derived from Demoland to a large extent, but has been changed for various creative purposes. This differnce in the organisation unit hierarchy is quite typicaly between two different instances of DHIS2. Often the names of organisation units (sites) are similar, but not quite the same. Similarly, there are commonalities between the metadata. Trainingland has data elements which are more typical of a MoH system, with a broad range of basic data elements being collected. DATIM is more focused on PEPFAR specific programmatic indicators, which tend to be much more specicic and varied. These two factors will create challenges in our data exchange scenario, which we will attempt to create some solutions for. 
+
+The overall goals of this excercise is to show you how to: 
+1. Interact with the API of the two different systems
+2. Demonstrate approaches for how to handle data exchange problems
+3. Produce some sample data payloads which can be imported into DATIM to fully simulate the excercise.
+
+##Getting started /Pre-requisites
+
+This excercise has been written in the R programming language. R is a useful tool, since it is freely available and works on multiple platforms. It has a useful REPL (Read Eval Print Loop) function, which allows code to be written and evaluated interactively. You can get a copy of R from [CRAN](https://cran.r-project.org/). [RStudio](https://www.rstudio.com/products/rstudio/download/) is a free interactive development enviornment which is also handy to have, but not required.  If you would like to follow along with the code in this example, you should grab a copy of R and install it on your computer.
+
+While R has been used for this example, any programming language could theoretically be used. Scripting languages such as Python, Node.JS, Ruby, PHP, etc would also likely be equally capable of performing this excercise. Another possible approach would be to use other tools like Microsoft Access or Excel.Its really up to you to decide what is most appropriate for your environment and skill set! 
+
+In addition to having a scripting language available (like R or your favorite), it would be useful to get a copy of the Trainingland database available on your own machine. The easiest way to do this is to install the [Docker platform](https://docs.docker.com/engine/installation/) for your operating system and then to use the docker-compose script from the DHIS2 core development team made available [here](https://raw.githubusercontent.com/jason-p-pickering/dhis2-docker/master/docker-compose-trainingland.yml)
+
+In addition to this, it is assumed that the reader has familiarized themselves with the DHIS2 API [documentation](http://dhis2.github.io/dhis2-docs/master/en/developer/html/ch01.html). 
+
+##Approaching the problem
+
+Typically, the first part in identifying the data exchange approach is to determine what is actually possible to be exchanged.  Even through both Demoland and Trainingland are using DHIS2, they have completely different metadata. Typically, there would need to be M&E experts involved in order to determine the method to map data elements from one system to data elements of another system. The best place to get started, is to look at the data entry forms of the two systems. For now, we will focus on HTC testing. 
+
+In the Trainingland database, we can see there are data elements related to HIV testing. 
+
+![alt text](images/trainingland_data_entry.png)
+
+It appears that the data has been disaggregated by persons tested, persons testing positive, and by service point type (PMTCT,TB and Other). 
+
+DATIM has considerably more HTC data elements, broken down by various age groups, testing results, service point type, and DSD (Direct service delivery) and TA (Technical assistance). We first need to figure out how to map the data elements from the source system (Trainingland) onto the destination system (Demoland). The easiest looks like 
+the "top-level numerator" in DATIM, HTC_TST (N, DSD): HTC received results. 
+
+
+
+##Organisation unit mapping
+
+Before we can even get started with getting data, we need to consider the organisation unit hierarchy. Demoland and Trainingland have similar hierarchies, but they are a bit different. 
+![alt text](images/compare_hierarchy.png)
+
+We note however that some of the sites appear to be similar in terms of how they are named, namely "Cardinal Site" in Demoland and "Cardinal Hospital Gateway PHC" in Trainingland. For the purposes of this excercise, we will assume that if the first name matches ("Cardinal"), then the two sites are the same. In reality, a much more detailed analysis would be required. However, the expected output will be the same: a map of organisation units from the source system to the destination system. In this case, we will use an automated matching (on the first name which matches), but it would not be expected that in all situations, it would be this simple to create a map from one system to another. 
+
+For the purposes of simplicity for this example, we will restrict ourselves to the "Bird Distrct", although the same approach could be generalized and applied to other districts as well. Let's get started. 
+
+In order to get started, we will need a few helper libraries, and to define the login details for the two systems.
+
+```{r}
+require(httr)
+require(jsonlite)
+require(RCurl)
+require(rlist)
+require(plyr)
+require(reshape2)
+
+#login details for Trainingland
+source.url<-"http://localhost:8888"
+source.username<-"admin"
+source.password<-"district"
+
+#Login details for Demoland
+dest.url<-"https://demo.datim.org"
+dest.username<-"partner"
+dest.password<-"Password1"
+```
+
+First, we request a listing of organisation units in Bird District from the source system (Trainingland) and convert that to a data frame which we can work with more easily
+
+```{r}
+#Orgunit mapping
+#OUs from Bird District in Trainingland
+url<-paste0(source.url,"/api/organisationUnits/Hq1ZHMHGvQE?fields=children[id,name]")
+r<-httr::GET(url, httr::authenticate(source.username,source.password),httr::timeout(60))
+r<- httr::content(r, "text")
+#Change the JSON response to a data frame
+ous.source<-jsonlite::fromJSON(r,flatten=TRUE)[[1]]
+
+#Get the first name
+foo<-strsplit(ous.source$name," ")
+ous.source$first_name<-rapply(foo, function(x) head(x, 1))
+names(ous.source)<-paste0("source_",names(ous.source))
+```
+
+Note below that this is simply a list of organisation units from the source system, along with their internal identifiers on the source system. Additionally, we have created a new column **source_first_name** which we will use to match with the destination system in Demoland. 
+
+```{r echo=FALSE}
+head(ous.source, n=3L)
+```
+
+Next, we will perform the same operation with Demoland, and then merge (join) both of the data frames together to obtain the map of organisation units between both systems. Note that in the destination system, the ID of "Bird District" is different (LnGaK6y98gC). 
+
+```{r}
+#OUs from Bird District in Demoland
+url<-paste0(dest.url,"/api/organisationUnits/LnGaK6y98gC?fields=children[id,name]")
+r<-httr::GET(url, httr::authenticate(dest.username,dest.password),httr::timeout(60))
+r<- httr::content(r, "text")
+ous.dest<-jsonlite::fromJSON(r,flatten=TRUE)[[1]]
+
+#Get the first name
+foo<-strsplit(ous.dest$name," ")
+ous.dest$first_name<-rapply(foo, function(x) head(x, 1))
+names(ous.dest)<-paste0("dest_",names(ous.dest))
+#Try and merge the two and see how close we are
+ous<-merge(ous.source,ous.dest,by.x="source_first_name",by.y="dest_first_name",all=T)
+```
+
+We now have an object (below) which provides the necessary mapping between the source system (Trainingland) and the destination system (Demoland). Take note that "Heron Site" in Demoland has no equivalent match in the source system. This is a fairly common problem, where organisation units in one system do not have equivalent sites in another system. In this case of course, no data can be reported for "Heron Site" from the source system, as it does not exist there.
+
+```{r echo=FALSE}
+head(ous, n=4L)
+```
+
+##Data element mapping: HTC_TST (N, DSD): HTC received results (default)
+
+Now that we have a map of organisation units for Bird District, we can move on to mapping of the data elements from one system to the other. We will start with the simplest example below.
+
+``` 
+HTC_TST (N, DSD): HTC received results (default) = HIV tests performed PMTCT + HIV tests performed TB  +
+  HIV tests performed Other
+```
+
+We will need to request data from the source system (Trainingland) and transform the data to a format which we can import into Demoland. 
+First, we note from the data entry form that the source data element is named "HIV tests performed" 
+and has a category combo of "HIV service". Although the analytics engine of DHIS2 can aggregate this for us, for the sake of this excercise, we will request a bit more data and then transform and aggregate it in R. 
+
+**Tip* One of the easiest ways to develop an analytics URL, is to create a pivot table of the data which you actually need, and then press F12, and get the URL which is used by the Pivot Table to retreive the data. We will build up the analytics request piece-by-piece, and then request the data from the Trainingland instance. 
+
+```{r}
+#This is the basic endpoint we will interact with. 
+url.base<-"http://localhost:8888/api/analytics.json?"
+
+#We note from analyzing the data entry form of Trainingland, that HIV tests performed has the following UID
+url.dx<-"dimension=dx:W19KeR5yuWm"
+
+#The organisation unit dimension is requested for Bird District at level 4 (facility)
+url.ou<-"&dimension=ou:Hq1ZHMHGvQE;LEVEL-4"
+
+#We ask for the desired time periods
+url.pe<-"&dimension=pe:2015Q1;2015Q2;2015Q3;2015Q4"
+
+#This dimension is the category combo "HIV Service" which disaggregates
+#The data by service type.
+url.disagg<-"&dimension=smOoBl0O7ep:Cvx2nkewzgw;I0kOLNtdqRM;rdJ14klxSso"
+
+#Return the data by name along with the metadata (set to true in the pivots)
+url.meta<-"&displayProperty=NAME&skipMeta=false"
+
+url<-paste0(url.base,url.dx,url.ou,url.pe,url.disagg,url.meta)
+
+r<-httr::GET(url, httr::authenticate(source.username,source.password),httr::timeout(60))
+r<- httr::content(r, "text")
+htc<-jsonlite::fromJSON(r,flatten=TRUE)
+
+```
+
+Once we make the request, a JSON object is returned from the server, which contains both the metadata as well as the data which was requested, which is described briefly below.
+
+* headers: An list which describes the data response.
+* metaData: A list which provides the metadata mapping from IDs to names. 
+* width/height: Integers which provide the size of the data response
+* rows: A matrix of values which corresponds to the structure provided in the headers list.
+
+```{r echo=FALSE}
+str(htc,max.level=1)
+```
+
+We will now proceed to transform the data from Trainingland to a JSON payload which we can import into Demoland. 
+```{r}
+#Start by extracting the data
+htc.data<-data.frame(htc$rows)
+#Assign the names to make it a bit more friendly
+names(htc.data)<-htc$headers$column
+
+#Lets remap the Organisation units
+#First, get a map of all complete matches
+ous.matches<-ous[complete.cases(ous),c("source_id","dest_id","dest_name")]
+
+#We merge this with the data, which will also filter out any incomplete matches
+htc.data<-merge(htc.data,ous.matches,by.x="Organisation unit",by.y="source_id")
+
+#The data must be aggregated now, effectively removing the disaggregation, as we are 
+#focusing on the top line number right now.
+#Make the number numeric so it can be aggregated
+htc.data$Value<-as.numeric(as.character(htc.data$Value))
+
+#And aggregate everything by quarter and organisation unit, using the destination organisation ID
+htc.data<-aggregate(Value ~ Period + dest_id , data=htc.data[,c("Period","dest_id","Value")],FUN=sum)
+```
+
+As we see below, we now have data which has been aggregated to remove the disaggregation present in the source system (HIV Service type). We have also remapped the organisation unit ids from the source system, onto the organisation units of the destination system. 
+
+
+head(htc.data)
+```
+
+Next, we will assign the data element from Demoland. Since we are only working with a single data element, it is simple, but in a real system, a more comprehensive map and methods would need to be developed to map data elements from one system to the other.
+
+```{r}
+#We note from the data entry form of training land, that the 
+#desitnation data has the following attributes for the 
+#data element UID and the category option combo. 
+#Assign these to the data, as we will need them when we send the payload
+htc.data$de<-"K6f6jR0NOcZ"
+htc.data$coc<-"HllvX50cXC0"
+```
+
+All data in the target system (Demoland) requires attribution of the data to a particular mechanism. Trainingland has no such information, so prior knowledge of which partner (or partners) is working in which facility and how much of the overall total reported, would need to be known beforehand. In this case, we will assign these to 
+Parrot IM, which has an ID of *jgxivsFwmyR* in Demoland.
+
+```{r}
+htc.data$acoc<-"jgxivsFwmyR"
+```
+
+At this point, we should have everything we need in order to assemble our data payload. We will just create a new list and save it as a JSON string which we can then upload to Demoland.
+
+```{r}
+dv<-list(dataValues=list())
+for (i in 1:nrow(htc.data)){
+  foo<-list(dataElement=as.character(htc.data$de[i]),
+            period=as.character(htc.data$Period[i]),
+            orgUnit=as.character(htc.data$dest_id[i]),
+            categoryOptionCombo=as.character(htc.data$coc[i]),
+            attributeOptionCombo=as.character(htc.data$acoc[i]),
+            value=as.character(htc.data$Value[i]))
+  dv$dataValues<-list.append(dv$dataValues,foo)
+}
+
+cat(file="htc_demoland_trainingland.json",toJSON(dv,auto_unbox=TRUE))
+```
+
+We see that thet JSON string has been produced, and should be ready to upload to Demoland.
+
+```{r echo=FALSE}
+paste0(substr(toJSON(dv,auto_unbox=TRUE),0,175),"...")
+```
+
+We can test the import of the data to see if we have constructed the payload correctly. 
+
+```{r}
+url<-paste0(dest.url,"/api/dataValueSets?dryRun=true&preheatCache=false")
+curlPerform(url=url,userpwd=paste0(dest.username,":",dest.password),
+            httpauth = 1L,
+            httpheader=c(Accept="application/json", Accept="multipart/*", 'Content-Type' = "application/json"),
+            postfields= toJSON(dv,auto_unbox=TRUE),
+            verbose = FALSE )
+
+```
+
+From the response, it seems that things went well. `r length(dv$dataValues)` values were ignored, which is expected since we set the paramater *dryRun=true*, which will not actually save the data in the system, but rather simply validate that the payload is actually correct.
+
+
+## Calculation HTC_TST (N, DSD, Results): HTC received results
+This data elements in Demoland is disaggregated by positive and negative results, but in Trainingland the  data is disaggregated by number of tests and number of positive tests. Thus, we will need to calculate the negative results in Trainingland, and then prepare another payload, similar to the previous example.  We will assume in Trainingland, that there are no indeterminate tests, and that the negative tests can be derived from the total tests performed minus the positive tests.
+
+Althought DHIS2 is capable of aggregating monthly data to quarterly data, there could be instances in which you might need to perform some special aggregation on the quarterly data before importing to DATIM, such as with snapshot indicators like "Current on Treatment". In the case of this example however, we will just request the data by month, and then aggregate it to quarters in R, for the sake of the example. 
+
+We start again by building up the URL which will be used to request the data from the source system. 
+
+```{r}
+#This is the basic endpoint we will interact with.
+url.base<-"http://localhost:8888/api/analytics.json?"
+#This time, we ask for the total number of tests as well as positive tests
+url.dx<-"dimension=dx:W19KeR5yuWm;yqGMyktY9F1"
+#The organisation unit dimension is requested for Bird District at level 4 (facility)
+url.ou<-"&dimension=ou:Hq1ZHMHGvQE;LEVEL-4"
+#Lets get the data by month, to show how we can aggregate monthly data to quarterly data, getting all data for 2015.
+url.pe<-paste0("&dimension=pe:",paste("2015",sprintf("%02d",1:12),sep="",collapse=";"))
+#We will omit any disaggregation from the analytics request, for the sake of simplicity. 
+url.meta<-"&displayProperty=NAME&skipMeta=false"
+#Return the data by name along with the metadata (set to true in the pivots)
+url<-paste0(url.base,url.dx,url.ou,url.pe,url.meta)
+
+r<-httr::GET(url, httr::authenticate(source.username,source.password),httr::timeout(60))
+r<- httr::content(r, "text")
+htc<-jsonlite::fromJSON(r,flatten=TRUE)
+
+
+htc.data<-data.frame(htc$rows)
+#Assign the names to make it a bit more friendly
+names(htc.data)<-htc$headers$column
+#Lets remap the data element names. First lets make a data frame of the metadata
+metadata<-ldply(lapply(htc$metaData$names, function(x) t(unlist(x))))
+names(metadata)<-c("id","name")
+
+#Map the identifiers to names
+htc.data$Data<-mapvalues(htc.data$Data,metadata$id,as.character(metadata$name),warn_missing=FALSE)
+#Lets get rid of the "HIV tests " part of the name
+htc.data$Data<-gsub("HIV tests ","",htc.data$Data)
+htc.data$Data<-as.factor(htc.data$Data)
+htc.data$"Organisation unit"<-as.factor(htc.data$"Organisation unit")
+#Lets rename this column, as it does not work so well with spaces
+names(htc.data)[names(htc.data) == "Organisation unit"]<-"ou"
+```
+
+As seen below, we now have a data frame with "performed" and "positive" data values for each site and month. 
+
+```{r echo=FALSE}
+head(arrange(htc.data,ou,Period,Data))
+```
+
+Since the data has been requested in  monthly format, we will need to aggregate it to quarters and then calcualte the number of negative tests from the total tests performed and the positive tests.
+
+```{r}
+htc.data$Period<-as.factor(htc.data$Period)
+#We need to change the months to quarters, and aggregate the values
+whichQuarter<-function(x) {paste0(substr(x,0,4),"Q",ceiling(as.numeric(substr(x,5,6))/3)) }
+htc.data$Period<-sapply(htc.data$Period,whichQuarter)
+htc.data$Value<-as.numeric(as.character(htc.data$Value))
+
+#We will reshape the data, placing the "positive" and "performed" on a column and then calculating the negative tests. 
+#We will also aggregate the monthly data to quarterly, assuming that any missing data can be assumed to be a zero.
+htc.data<-recast(htc.data, ou + Period ~ Data,fun.aggregate=function(x) {sum(x,na.rm=T)})
+#Now, we calcualte the negative results
+htc.data$negative=htc.data$performed-htc.data$positive
+```
+
+At this point, we have reshaped the data and calculated the number of negative tests results and have aggregated this data from monthly to quarterly figures.
+
+
+```{r echo=FALSE}
+head(arrange(htc.data,ou,Period))
+```
+
+This data is in so-called "wide" format, with multiple values on the columns. The data needs to be reshaped. 
+
+```{r}
+#The data needs to be reshaped again from wide to long. We will take out the "performed" as it is no longer needed.
+htc.data<-melt(htc.data[,c("ou","Period","positive","negative")],id=c("ou","Period"))
+#Remove any NAs, as we will not transmit these
+htc.data<-htc.data[!is.na(htc.data$value),]
+#We need to remap the ou column, as this is now referring to the source, not the destination
+htc.data<-merge(htc.data,ous.matches,by.x="ou",by.y="source_id")
+
+#We note from the data entry screens that this data element has the UID of 
+#EjdjNEKUqUE
+#While the category option combos are as follows
+#Positive = XkqnsV4slkA
+#Negative = ZZgjEm5kvv3
+
+#Lets remap the "variable" column and use this as the category option combo column
+htc.data$variable<-ifelse(htc.data$variable =="positive","XkqnsV4slkA","ZZgjEm5kvv3")
+```
+
+At this point, we are almost ready to produce the data payload. As seen below, we have the organisation unit id *dest_id* in Demoland. The data element for **HTC_TST (N, DSD, Results)** has been determined to be"EjdjNEKUqUE".  The *variable* column in this case represents the category option combination (disaggregate) in the destination system. 
+
+
+```{r echo=FALSE}
+head(arrange(htc.data,ou,Period))
+```
+
+We will now produce the necessary JSON payload from our data, again using the ID for Parrot Implementing Mechanism in Demoland as our attribute option combination. 
+
+
+```{r}
+dv<-list(dataValues=list())
+for (i in 1:nrow(htc.data)){
+  foo<-list(dataElement="EjdjNEKUqUE",
+            period=as.character(htc.data$Period[i]),
+            orgUnit=as.character(htc.data$dest_id[i]),
+            categoryOptionCombo=as.character(htc.data$variable[i]),
+            attributeOptionCombo="jgxivsFwmyR",
+            value=as.character(htc.data$value[i]))
+  dv$dataValues<-list.append(dv$dataValues,foo)
+}
+
+cat(file="htc_demoland_trainingland_neg_pos.json",toJSON(dv,auto_unbox=TRUE))
+
+url<-paste0(dest.url,"/api/dataValueSets?dryRun=true&preheatCache=false")
+curlPerform(url=url,userpwd=paste0(dest.username,":",dest.password),
+            httpauth = 1L,
+            httpheader=c(Accept="application/json", Accept="multipart/*", 'Content-Type' = "application/json"),
+            postfields= toJSON(dv,auto_unbox=TRUE),
+            verbose = FALSE )
+```
+
+From the server response, we can see that our payload was valid, and that `r length(dv$dataValues)` would have been imported. 
