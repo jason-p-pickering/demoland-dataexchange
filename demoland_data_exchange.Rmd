@@ -68,7 +68,7 @@ Take note that some of the sites appear to be similar in terms of how they are n
 
 For the purposes of simplicity for this example, we will restrict ourselves to the "Bird District", although the same approach could be generalized and applied to other districts as well. Let's get started. 
 
-We will load a few helper libraries, and to define the login details for the two systems.
+We will load a few helper libraries first and define the login details for the two systems.
 
 ```{r,results='hide',message=FALSE}
 #HTTP operations
@@ -106,8 +106,7 @@ r<- httr::content(r, "text")
 ous.source<-jsonlite::fromJSON(r,flatten=TRUE)[[1]]
 
 #Get the first name for each site
-foo<-strsplit(ous.source$name," ")
-ous.source$first_name<-rapply(foo, function(x) head(x, 1))
+ous.source$first_name<-rapply(strsplit(ous.source$name," "), function(x) head(x, 1))
 names(ous.source)<-paste0("source_",names(ous.source))
 ```
 
@@ -225,7 +224,7 @@ Take note here we are renaming the columns of the data to match what DHIS2 expec
 
 As we see below, we now have data which has been aggregated to remove the disaggregation present in the source system (HIV Service type). We have also remapped the organisation unit ids from the source system, onto the organisation units of the destination system. 
 
-```{r}
+```{r echo=FALSE}
 head(htc.data)
 ```
 
@@ -268,7 +267,9 @@ We can test the import of the data to see if we have constructed the payload cor
 url<-paste0(dest.url,"/api/dataValueSets?dryRun=true&preheatCache=false")
 RCurl::curlPerform(url=url,userpwd=paste0(dest.username,":",dest.password),
             httpauth = 1L,
-            httpheader=c(Accept="application/json", Accept="multipart/*", 'Content-Type' = "application/json"),
+            httpheader=c(Accept="application/json", 
+                         Accept="multipart/*", 
+                         'Content-Type' = "application/json"),
             postfields= toJSON(dv,auto_unbox=TRUE),
             verbose = FALSE )
 
@@ -297,22 +298,21 @@ url.pe<-paste0("&dimension=pe:",paste("2015",sprintf("%02d",1:12),sep="",collaps
 url.meta<-"&displayProperty=NAME&skipMeta=false"
 #Return the data by name along with the metadata (set to true in the pivots)
 url<-paste0(url.base,url.dx,url.ou,url.pe,url.meta)
-
+#Get the JSON resource from the server
 r<-httr::GET(url, httr::authenticate(source.username,source.password),httr::timeout(60))
 r<- httr::content(r, "text")
 htc<-jsonlite::fromJSON(r,flatten=TRUE)
-
-
+#Convert the actual data to a data frame
 htc.data<-data.frame(htc$rows)
 #Assign the names to make it a bit more friendly
 names(htc.data)<-htc$headers$column
-#Lets remap the data element names. First lets make a data frame of the metadata
+#Lets remap the data element names. First lets make a data frame of the metadata.
 metadata<-plyr::ldply(lapply(htc$metaData$names, function(x) t(unlist(x))))
 names(metadata)<-c("id","name")
 
 #Map the identifiers to names
 htc.data$Data<-plyr::mapvalues(htc.data$Data,metadata$id,as.character(metadata$name),warn_missing=FALSE)
-#Lets get rid of the "HIV tests " part of the name
+#Lets get rid of the "HIV tests " part of the name and factorize
 htc.data$Data<-gsub("HIV tests ","",htc.data$Data)
 htc.data$Data<-as.factor(htc.data$Data)
 htc.data$"Organisation unit"<-as.factor(htc.data$"Organisation unit")
@@ -320,13 +320,14 @@ htc.data$"Organisation unit"<-as.factor(htc.data$"Organisation unit")
 names(htc.data)<-c("dataElement","orgUnit","period","value")
 ```
 
-As seen below, we now have a data frame with "performed" and "positive" data values for each site and month. 
+As seen below, we now have a data frame with "performed" and "positive" data values for each site and month. With this, we can easily calculate the negative tests.
+
 
 ```{r echo=FALSE}
 head(arrange(htc.data,orgUnit,period,dataElement))
 ```
 
-Since the data has been requested in  monthly format, we will need to aggregate it to quarters and then calculate the number of negative tests from the total tests performed and the positive tests.
+Since the data has been requested in  monthly format, we will need to aggregate it to quarters and then calculate the number of negative tests from the total tests performed and the positive tests. In addition to that, we will need to aggregate the monthly data to quarterly data.
 
 ```{r}
 htc.data$period<-as.factor(htc.data$period)
@@ -338,7 +339,8 @@ htc.data$period<-sapply(htc.data$period,whichQuarter)
 htc.data$value<-as.numeric(as.character(htc.data$value))
 #We will reshape the data, placing the "positive" and "performed" on a column and then calculating the negative tests. 
 #We will also aggregate the monthly data to quarterly, assuming that any missing data can be assumed to be a zero.
-htc.data<-reshape2::recast(htc.data, orgUnit + period ~ dataElement,fun.aggregate=function(x) {sum(x,na.rm=T)})
+htc.data<-reshape2::recast(htc.data, orgUnit + period ~ dataElement,
+                           fun.aggregate=function(x) {sum(x,na.rm=T)})
 #Now, we calcualte the negative results
 htc.data$negative=htc.data$performed-htc.data$positive
 ```
@@ -357,7 +359,7 @@ This data is in so-called "wide" format, with multiple values on the columns. Th
 htc.data<-reshape2::melt(htc.data[,c("orgUnit","period","positive","negative")],id=c("orgUnit","period"))
 #Remove any NAs, as we will not transmit these
 htc.data<-htc.data[!is.na(htc.data$value),]
-#We need to remap the ou column, as this is now referring to the source, not the destination
+#We need to remap the organisation unit column, as this is now referring to the source, not the destination
 htc.data<-merge(htc.data,ous.matches,by.x="orgUnit",by.y="source_id")
 
 #We note from the data entry screens that this data element has the UID of 
@@ -396,7 +398,9 @@ cat(file="htc_demoland_trainingland_neg_pos.json",toJSON(dv,auto_unbox=TRUE))
 url<-paste0(dest.url,"/api/dataValueSets?dryRun=true&preheatCache=false")
 RCurl::curlPerform(url=url,userpwd=paste0(dest.username,":",dest.password),
             httpauth = 1L,
-            httpheader=c(Accept="application/json", Accept="multipart/*", 'Content-Type' = "application/json"),
+            httpheader=c(Accept="application/json", 
+                         Accept="multipart/*", 
+                         'Content-Type' = "application/json"),
             postfields= toJSON(dv,auto_unbox=TRUE),
             verbose = FALSE )
 ```
@@ -421,7 +425,8 @@ url.base<-"http://demo.datim.org/api/analytics.json?"
 url.dx<-"dimension=dx:tG7ocyZ8kVA"
 #The organisation unit dimension is requested for Bird District at level 6 (facility level in Demoland)
 url.ou<-"&dimension=ou:LnGaK6y98gC;LEVEL-6"
-#Lets get the data by month, to show how we can aggregate monthly data to quarterly data, getting all data for Fiscal Year 2014
+#Lets get the data by month, to show how we can aggregate monthly data to quarterly data, 
+#getting all data for Fiscal Year 2014
 url.pe<-"&dimension=pe:2013Q4;2014Q1;2014Q2;2014Q3"
 #We will omit any disaggregation from the analytics request, for the sake of simplicity. 
 url.meta<-"&displayProperty=NAME&skipMeta=false"
@@ -451,21 +456,18 @@ htc.data$Data<-plyr::mapvalues(htc.data$Data,metadata$id,as.character(metadata$n
 names(htc.data)[names(htc.data) == "Organisation unit"]<-"orgUnit"
 names(htc.data)[names(htc.data) == "Data"]<-"dataElement"
 names(htc.data)[names(htc.data) == "Value"]<-"value"
-names(htc.data)[names(htc.data) == "Period"]<-"period"
+names(htc.data)[names(htc.data) == "Period"]<-"quarter"
 ```
 
 Another wrinkle which we must solve is how to deal with the differing reporting frequencies. In Demoland, the data is reported quarterly, thus, monthly data for this data element is not available. We will create two functions to deal with this. The first (below) will produce three monthly periods from a quarter. Thus, if the quarter is reported to be "2015Q1", the function will produce three monthly periods for January, February, and March 2015. 
 
 ```{r}
-#Copy the period to a new column 
-htc.data$quarter<-htc$metaData$period
-
 #Create a new function to transform monthly periods to quarters
+#Ensure the monthly periods are fomatted according to the ADX spec
 monthlyPeriodsFromQuarters<-function(x) {
 year<-paste0(substr(x,0,4))
 end<-as.numeric(substr(x,6,6))*3
-paste0(year,sprintf("%02d",seq(end-2,end)))
-}
+paste0(year,"-",sprintf("%02d",seq(end-2,end)),"-01/P1M") }
 ```
 
 Next, we will split the quarterly figure into three roughly equal monthly values, such that the sum of the new monthly values will remain equal to the quarterly value which was retrieved from Demoland.
@@ -484,13 +486,10 @@ Next, we will simply create a new data frame, which will effectively transform t
 ```{r}
 data.months<-htc.data[0,]
 for (i in 1:nrow(htc.data)){
-other<-htc.data[i,c("dataElement","orgUnit")]
+others<-htc.data[i,c("dataElement","orgUnit")]
 vals<-monthlyValuesFromQuarters(as.numeric(as.character(htc.data$value[i])))
-period<-monthlyPeriodsFromQuarters(htc.data$period[i])
-foo<-merge(other,vals,all=T)
-names(foo)<-c("dataElement","orgUnit","value")
-foo<-cbind(foo,period)
-data.months<-rbind(data.months,foo[names(data.months)])
+period<-monthlyPeriodsFromQuarters(htc.data$quarter[i])
+data.months<-rbind(data.months,cbind(others,vals,period,row.names=NULL))
 }
 ```
 
@@ -511,6 +510,8 @@ As in the previous example, we need to remap the organisation units, but this ti
 ```{r}
 #Remap the OUs
 data.months<-merge(data.months,ous[!is.na(ous$source_id),c("source_id","dest_id")],by.x="orgUnit",by.y="dest_id")
+#Ensure everything is characters
+data.months<-plyr::colwise(as.character)(data.months)
 ```
 
 Since we are transmitting data to Traininlgand, and its organisational unit UID is now in the "source_id" column, we need to be sure to use that to correctly identify the site.
@@ -529,9 +530,9 @@ foo<-addAttributes(adx, "exported" = format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ"))
 
 
 for (i in 1:nrow(data.months)) {
-attribs<-list(orgUnit=as.character(data.months$source_id[i]),
+attribs<-list(orgUnit=data.months$source_id[i],
 #We must correctly format the period to correspond to what ADX requires
-period=paste0(substr(as.character(data.months$period[i]),0,4),"-",substr(as.character(data.months$period[i]),5,6),"-01/P1M"),
+period=data.months$period[i],
 #The dataset code is required by ADX
 dataSet="PHC_MONTHLY",
 comment="Imported from Demoland")
@@ -543,7 +544,9 @@ dataValue<-newXMLNode("dataValue",attrs=attribs,parent=group) }
 url<-paste0(source.url,"/ohie/dataValueSets?dataElementIdScheme=CODE&orgUnitIdScheme=UID")
 curlPerform(url=url,userpwd=paste0(source.username,":",source.password),
                 httpauth = 1L,
-                httpheader=c(Accept="application/xml", Accept="multipart/*", 'Content-Type' = "application/xml"),
+                httpheader=c(Accept="application/xml", 
+                             Accept="multipart/*", 
+                             'Content-Type' = "application/xml"),
                 postfields= as(adx.doc,"character"),
                 verbose = FALSE ) 
 ```
